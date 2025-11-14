@@ -1,3 +1,6 @@
+// homehero-server/api/index.js
+// Full serverless Express API for Vercel (with optional Firebase token verify, seed, diagnostics)
+
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
@@ -12,19 +15,24 @@ dotenv.config();
 
 const app = express();
 
-// Security & perf
+// ---------------- Security & Perf ----------------
 app.use(helmet({ crossOriginResourcePolicy: { policy: "cross-origin" } }));
 app.use(compression());
 app.use(morgan("tiny"));
+app.use(express.json());
 
-// CORS
+// ---------------- CORS ----------------
 const allowedOrigins =
   process.env.CLIENT_ORIGIN?.split(",").map((s) => s.trim()).filter(Boolean) ||
   ["http://localhost:5173"];
-app.use(cors({ origin: allowedOrigins, credentials: true }));
-app.use(express.json());
+app.use(
+  cors({
+    origin: allowedOrigins,
+    credentials: true,
+  })
+);
 
-// Mongo cached connect
+// ---------------- MongoDB (cached connect for serverless) ----------------
 const MONGODB_URI = process.env.MONGODB_URI;
 let cached = global.mongoose;
 if (!cached) cached = (global.mongoose = { conn: null, promise: null });
@@ -32,16 +40,33 @@ if (!cached) cached = (global.mongoose = { conn: null, promise: null });
 async function connectDB() {
   if (cached.conn) return cached.conn;
   if (!cached.promise) {
+    if (!MONGODB_URI) {
+      throw new Error("Missing MONGODB_URI env");
+    }
     cached.promise = mongoose
-      .connect(MONGODB_URI, { dbName: "homehero", bufferCommands: false })
-      .then((m) => m.connection);
+      .connect(MONGODB_URI, {
+        dbName: "homehero",
+        bufferCommands: false,
+        serverSelectionTimeoutMS: 10000, // 10s
+        connectTimeoutMS: 10000,
+        socketTimeoutMS: 20000,
+      })
+      .then((m) => {
+        console.log("MongoDB connected:", m.connection.host);
+        return m.connection;
+      })
+      .catch((err) => {
+        console.error("MongoDB connect error:", err.message);
+        throw err;
+      });
   }
   cached.conn = await cached.promise;
   return cached.conn;
 }
 
-// Firebase Admin (optional)
+// ---------------- Firebase Admin (optional token verify) ----------------
 const VERIFY_TOKEN = String(process.env.VERIFY_TOKEN || "false") === "true";
+
 function initAdmin() {
   try {
     if (admin.apps.length) return;
@@ -77,7 +102,7 @@ async function verifyAuth(req, res, next) {
   }
 }
 
-// Schemas
+// ---------------- Schemas & Models ----------------
 const ReviewSchema = new mongoose.Schema({
   userEmail: { type: String, required: true, lowercase: true, trim: true },
   rating: { type: Number, min: 1, max: 5, required: true },
@@ -112,6 +137,7 @@ const BookingSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+// Prevent duplicate same-date booking by same user for same service
 BookingSchema.index({ userEmail: 1, serviceId: 1, bookingDate: 1 }, { unique: true });
 
 const FavoriteSchema = new mongoose.Schema(
@@ -127,9 +153,10 @@ const Service = mongoose.models.Service || mongoose.model("Service", ServiceSche
 const Booking = mongoose.models.Booking || mongoose.model("Booking", BookingSchema);
 const Favorite = mongoose.models.Favorite || mongoose.model("Favorite", FavoriteSchema);
 
-// Utils
+// ---------------- Utils ----------------
 const slugify = (s) =>
   s?.toLowerCase().trim().replace(/[^\w\s-]/g, "").replace(/\s+/g, "-").slice(0, 60) || "";
+
 async function uniqueSlugForNew(name) {
   const base = slugify(name);
   let slug = base;
@@ -145,12 +172,97 @@ async function uniqueSlugForUpdate(name, id) {
   return slug;
 }
 
-// Health
+// ---------------- Health & Diagnostics ----------------
 app.get("/healthz", (req, res) => res.status(200).send("ok"));
-app.get("/", (req, res) => res.send({ ok: true, message: "HomeHero API is running" }));
 
-// Ensure DB
+app.get("/__db", async (req, res) => {
+  try {
+    await connectDB();
+    const ping = await mongoose.connection.db.admin().command({ ping: 1 }).catch(() => ({ ok: 0 }));
+    const total = await Service.estimatedDocumentCount().catch(() => null);
+    res.json({ ok: true, mongo: { host: mongoose.connection.host, ping: ping.ok === 1 }, services: total });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// ---------------- TEMP Seed Routes (remove after use) ----------------
+app.all("/__seed", async (req, res) => {
+  try {
+    const key = (req.query.key || req.body?.key || "").toString();
+    if (!process.env.SEED_KEY || key !== process.env.SEED_KEY) {
+      return res.status(401).json({ message: "Unauthorized" });
+    }
+    await connectDB();
+
+    const already = await Service.countDocuments();
+    if (already > 0) {
+      return res.status(400).json({ message: "DB already has data", total: already });
+    }
+
+    const samples = [
+      {
+        name: "AC Repair & Service",
+        category: "Electrical",
+        price: 1200,
+        description: "Split/Window AC servicing, gas refill, and minor repairs.",
+        image:
+          "https://images.unsplash.com/photo-1581093588401-16ecce3b9f6b?q=80&w=1200&auto=format&fit=crop",
+        providerName: "CoolFix",
+        providerEmail: "coolfix@demo.com",
+        ratingAvg: 4.7,
+      },
+      {
+        name: "Deep Cleaning (2BHK)",
+        category: "Cleaning",
+        price: 3000,
+        description: "Full home deep cleaning with eco-friendly supplies.",
+        image:
+          "https://images.unsplash.com/photo-1603715749720-5f28b4c81f01?q=80&w=1200&auto=format&fit=crop",
+        providerName: "CleanPros",
+        providerEmail: "clean@demo.com",
+        ratingAvg: 4.8,
+      },
+      {
+        name: "Plumbing Fix",
+        category: "Plumbing",
+        price: 800,
+        description: "Leak fix, tap replacement, drain unclog.",
+        image:
+          "https://images.unsplash.com/photo-1581578017423-3b9b6a9a62da?q=80&w=1200&auto=format&fit=crop",
+        providerName: "PipeMasters",
+        providerEmail: "plumb@demo.com",
+        ratingAvg: 4.5,
+      },
+      {
+        name: "Electrician On-Demand",
+        category: "Electrical",
+        price: 600,
+        description: "Fan, light, socket, MCB, wiring and more.",
+        image:
+          "https://images.unsplash.com/photo-1517048676732-d65bc937f952?q=80&w=1200&auto=format&fit=crop",
+        providerName: "VoltCare",
+        providerEmail: "electric@demo.com",
+        ratingAvg: 4.6,
+      },
+    ];
+
+    const docs = await Promise.all(
+      samples.map(async (s) => ({ ...s, slug: await uniqueSlugForNew(s.name) }))
+    );
+    const result = await Service.insertMany(docs);
+    const total = await Service.countDocuments();
+
+    res.json({ seeded: result.length, total });
+  } catch (e) {
+    console.error("SEED error:", e);
+    res.status(500).json({ message: e.message });
+  }
+});
+
+// ---------------- Ensure DB for all API routes except healthz/seed/db ----------------
 app.use(async (req, res, next) => {
+  if (req.path === "/healthz" || req.path === "/__db" || req.path === "/__seed") return next();
   try {
     await connectDB();
     next();
@@ -159,7 +271,7 @@ app.use(async (req, res, next) => {
   }
 });
 
-/* Public services */
+// ---------------- Public APIs ----------------
 app.get("/services", async (req, res) => {
   try {
     const { search, category, providerEmail, minPrice, maxPrice, sort, page = 1, limit = 12 } = req.query;
@@ -239,6 +351,7 @@ app.get("/provider/summary", async (req, res) => {
   try {
     const email = String(req.query.email || "").toLowerCase();
     if (!email) return res.status(400).json({ message: "email required" });
+
     const totalServices = await Service.countDocuments({ providerEmail: email });
     const services = await Service.find({ providerEmail: email }).select("_id ratingAvg");
     const serviceIds = services.map((s) => s._id);
@@ -292,14 +405,23 @@ app.get("/provider/analytics", async (req, res) => {
   }
 });
 
-/* PROTECTED routes */
+// ---------------- PROTECTED APIs (require token if VERIFY_TOKEN=true) ----------------
+
+// Create service (owner = token user when VERIFY_TOKEN=true)
 app.post("/services", verifyAuth, async (req, res) => {
   try {
     const tokenEmail = (req.user?.email || "").toLowerCase();
-    if (VERIFY_TOKEN && !tokenEmail) return res.status(401).json({ message: "Unauthorized" });
+    const isProtected = VERIFY_TOKEN && !!tokenEmail;
+    const {
+      name,
+      category,
+      price,
+      description,
+      image,
+      providerName = "Unknown",
+      providerEmail,
+    } = req.body;
 
-    const { name, category, price, description, image } = req.body;
-    const providerName = req.body.providerName || "Unknown";
     if (!name || !category || price == null || !description || !image) {
       return res.status(400).json({ message: "Missing required fields" });
     }
@@ -313,7 +435,7 @@ app.post("/services", verifyAuth, async (req, res) => {
       description,
       image,
       providerName,
-      providerEmail: tokenEmail || (req.body.providerEmail || "").toLowerCase(),
+      providerEmail: isProtected ? tokenEmail : (providerEmail || "").toLowerCase(),
     });
 
     res.status(201).json(doc);
@@ -322,13 +444,14 @@ app.post("/services", verifyAuth, async (req, res) => {
   }
 });
 
+// Update (owner-only)
 app.patch("/services/:id", verifyAuth, async (req, res) => {
   try {
     const tokenEmail = (req.user?.email || "").toLowerCase();
     const doc = await Service.findById(req.params.id);
     if (!doc) return res.status(404).json({ message: "Service not found" });
 
-    const requester = tokenEmail || (req.query.providerEmail || req.body.providerEmail || "").toLowerCase();
+    const requester = (VERIFY_TOKEN ? tokenEmail : (req.query.providerEmail || req.body.providerEmail || "")).toLowerCase();
     if (VERIFY_TOKEN && requester !== doc.providerEmail) {
       return res.status(403).json({ message: "Forbidden: not owner" });
     }
@@ -347,13 +470,14 @@ app.patch("/services/:id", verifyAuth, async (req, res) => {
   }
 });
 
+// Delete (owner-only)
 app.delete("/services/:id", verifyAuth, async (req, res) => {
   try {
     const tokenEmail = (req.user?.email || "").toLowerCase();
     const doc = await Service.findById(req.params.id);
     if (!doc) return res.status(404).json({ message: "Service not found" });
 
-    const requester = tokenEmail || (req.query.providerEmail || req.body.providerEmail || "").toLowerCase();
+    const requester = (VERIFY_TOKEN ? tokenEmail : (req.query.providerEmail || req.body.providerEmail || "")).toLowerCase();
     if (VERIFY_TOKEN && requester !== doc.providerEmail) {
       return res.status(403).json({ message: "Forbidden: not owner" });
     }
@@ -365,6 +489,7 @@ app.delete("/services/:id", verifyAuth, async (req, res) => {
   }
 });
 
+// Bookings
 app.post("/bookings", verifyAuth, async (req, res) => {
   try {
     const tokenEmail = (req.user?.email || "").toLowerCase();
@@ -377,12 +502,12 @@ app.post("/bookings", verifyAuth, async (req, res) => {
 
     const svc = await Service.findById(serviceId);
     if (!svc) return res.status(404).json({ message: "Service not found" });
-    if (svc.providerEmail === tokenEmail) {
+    if (VERIFY_TOKEN && svc.providerEmail === tokenEmail) {
       return res.status(403).json({ message: "You cannot book your own service" });
     }
 
     const b = await Booking.create({
-      userEmail: tokenEmail,
+      userEmail: VERIFY_TOKEN ? tokenEmail : (req.body.userEmail || "").toLowerCase(),
       serviceId,
       bookingDate: new Date(bookingDate),
       price: Number(price),
@@ -397,12 +522,12 @@ app.post("/bookings", verifyAuth, async (req, res) => {
 app.get("/bookings", verifyAuth, async (req, res) => {
   try {
     const tokenEmail = (req.user?.email || "").toLowerCase();
-    const userEmail = String(req.query.userEmail || "").toLowerCase();
-    if (VERIFY_TOKEN && (!userEmail || userEmail !== tokenEmail)) {
+    const queryEmail = String(req.query.userEmail || "").toLowerCase();
+    if (VERIFY_TOKEN && (!queryEmail || queryEmail !== tokenEmail)) {
       return res.status(403).json({ message: "Forbidden" });
     }
 
-    const items = await Booking.find({ userEmail: userEmail || tokenEmail })
+    const items = await Booking.find({ userEmail: VERIFY_TOKEN ? tokenEmail : queryEmail })
       .sort({ createdAt: -1 })
       .populate("serviceId", "name image providerName providerEmail price");
 
@@ -427,6 +552,7 @@ app.delete("/bookings/:id", verifyAuth, async (req, res) => {
   }
 });
 
+// Reviews (booked users only)
 app.post("/services/:id/reviews", verifyAuth, async (req, res) => {
   try {
     const tokenEmail = (req.user?.email || "").toLowerCase();
@@ -436,19 +562,21 @@ app.post("/services/:id/reviews", verifyAuth, async (req, res) => {
     const { rating, comment } = req.body;
     if (!rating) return res.status(400).json({ message: "rating required" });
 
-    const booked = await Booking.findOne({ userEmail: tokenEmail, serviceId: id });
+    const userEmail = VERIFY_TOKEN ? tokenEmail : (req.body.userEmail || "").toLowerCase();
+
+    const booked = await Booking.findOne({ userEmail, serviceId: id });
     if (!booked) return res.status(403).json({ message: "Only booked users can review" });
 
     const svc = await Service.findById(id);
     if (!svc) return res.status(404).json({ message: "Service not found" });
 
-    const idx = svc.reviews.findIndex((r) => r.userEmail === tokenEmail);
+    const idx = svc.reviews.findIndex((r) => r.userEmail === userEmail);
     if (idx >= 0) {
       svc.reviews[idx].rating = Number(rating);
       svc.reviews[idx].comment = comment || svc.reviews[idx].comment;
       svc.reviews[idx].date = new Date();
     } else {
-      svc.reviews.push({ userEmail: tokenEmail, rating: Number(rating), comment: comment || "" });
+      svc.reviews.push({ userEmail, rating: Number(rating), comment: comment || "" });
     }
     const sum = svc.reviews.reduce((acc, r) => acc + (r.rating || 0), 0);
     svc.ratingAvg = svc.reviews.length ? Number((sum / svc.reviews.length).toFixed(2)) : 0;
@@ -460,16 +588,17 @@ app.post("/services/:id/reviews", verifyAuth, async (req, res) => {
   }
 });
 
+// Favorites
 app.post("/favorites", verifyAuth, async (req, res) => {
   try {
     const tokenEmail = (req.user?.email || "").toLowerCase();
+    const userEmail = VERIFY_TOKEN ? tokenEmail : (req.body.userEmail || "").toLowerCase();
     const { serviceId } = req.body;
-    if (VERIFY_TOKEN && !tokenEmail) return res.status(401).json({ message: "Unauthorized" });
     if (!serviceId) return res.status(400).json({ message: "serviceId required" });
 
     const fav = await Favorite.findOneAndUpdate(
-      { userEmail: tokenEmail, serviceId },
-      { $setOnInsert: { userEmail: tokenEmail, serviceId } },
+      { userEmail, serviceId },
+      { $setOnInsert: { userEmail, serviceId } },
       { upsert: true, new: true }
     );
     res.status(201).json(fav);
@@ -482,7 +611,8 @@ app.post("/favorites", verifyAuth, async (req, res) => {
 app.get("/favorites", verifyAuth, async (req, res) => {
   try {
     const tokenEmail = (req.user?.email || "").toLowerCase();
-    const items = await Favorite.find({ userEmail: tokenEmail }).populate("serviceId");
+    const userEmail = VERIFY_TOKEN ? tokenEmail : (req.query.userEmail || "").toLowerCase();
+    const items = await Favorite.find({ userEmail }).populate("serviceId");
     res.json({ items });
   } catch (e) {
     res.status(500).json({ message: e.message });
@@ -502,16 +632,16 @@ app.delete("/favorites/:id", verifyAuth, async (req, res) => {
   }
 });
 
-// Global error
+// ---------------- Global Error Handler ----------------
 app.use((err, req, res, next) => {
   console.error("Unhandled error:", err);
   res.status(500).json({ message: "Internal Server Error" });
 });
 
-// Export for Vercel serverless
+// ---------------- Export serverless handler ----------------
 export default serverless(app);
 
-// Local dev (optional)
+// ---------------- Local Dev (optional) ----------------
 const port = process.env.PORT || 5000;
 if (!process.env.VERCEL) {
   (async () => {
