@@ -1,8 +1,11 @@
+// index.js
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
-dotenv.config();
+import connectDB from "./db/connect.js";
+import servicesRouter from "./routes/services.routes.js";
 
+dotenv.config();
 const app = express();
 
 app.use(cors({
@@ -11,12 +14,15 @@ app.use(cors({
 }));
 app.use(express.json());
 
-app.get("/", (req, res) => {
-  res.send({ ok: true, message: "HomeHero API is running" });
-});
+app.get("/", (req, res) => res.send({ ok: true, message: "HomeHero API is running" }));
 app.get("/healthz", (req, res) => res.status(200).send("ok"));
 
+app.use("/services", servicesRouter);
+
 export default app;
+
+// Connect DB and start local server
+connectDB().catch((e) => console.error(e));
 
 const port = process.env.PORT || 5000;
 if (!process.env.VERCEL) {
