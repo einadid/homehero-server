@@ -2,11 +2,11 @@
 "name": "homehero-server",
 "version": "1.0.0",
 "type": "module",
-"main": "index.js",
+"main": "api/index.js",
 "engines": { "node": ">=18" },
 "scripts": {
-"dev": "node index.js",
-"start": "node index.js"
+"dev": "node api/index.js",
+"start": "node api/index.js"
 },
 "dependencies": {
 "compression": "^1.7.4",
@@ -26,3 +26,4 @@
 "serve-static": "1.15.0"
 }
 }
+
