@@ -1,7 +1,7 @@
 // routes/bookings.routes.js
 import express from "express";
 import Booking from "../models/Booking.js";
-import Service from "../models/Service.js";
+import Service from "../../models/Service.js";
 
 const router = express.Router();
 
