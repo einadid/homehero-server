@@ -19,7 +19,7 @@ app.use(
 );
 app.use(express.json());
 
-// MongoDB connect (cached for serverless)
+// MongoDB connect (cached, serverless-friendly)
 const MONGODB_URI = process.env.MONGODB_URI;
 let cached = global.mongoose;
 if (!cached) cached = global.mongoose = { conn: null, promise: null };
@@ -28,17 +28,14 @@ async function connectDB() {
   if (cached.conn) return cached.conn;
   if (!cached.promise) {
     cached.promise = mongoose
-      .connect(MONGODB_URI, {
-        dbName: "homehero",
-        bufferCommands: false,
-      })
+      .connect(MONGODB_URI, { dbName: "homehero", bufferCommands: false })
       .then((m) => m.connection);
   }
   cached.conn = await cached.promise;
   return cached.conn;
 }
 
-// Schemas & Models
+// Models (inline)
 const ReviewSchema = new mongoose.Schema({
   userEmail: { type: String, required: true, lowercase: true, trim: true },
   rating: { type: Number, min: 1, max: 5 },
@@ -78,7 +75,7 @@ const Booking = mongoose.models.Booking || mongoose.model("Booking", BookingSche
 app.get("/healthz", (req, res) => res.status(200).send("ok"));
 app.get("/", (req, res) => res.send({ ok: true, message: "HomeHero API is running" }));
 
-// Ensure DB before handling routes
+// Ensure DB before routes
 app.use(async (req, res, next) => {
   try {
     await connectDB();
@@ -88,35 +85,28 @@ app.use(async (req, res, next) => {
   }
 });
 
-/* ---------------- Services Routes ---------------- */
+/* Services */
 app.post("/services", async (req, res) => {
   try {
     const { name, category, price, description, image, providerName, providerEmail } = req.body;
     if (!name || !category || price == null || !description || !image || !providerName || !providerEmail) {
       return res.status(400).json({ message: "Missing required fields" });
     }
-    const service = await Service.create({
-      name, category, price, description, image, providerName, providerEmail,
-    });
-    res.status(201).json(service);
-  } catch (err) {
-    res.status(500).json({ message: err.message });
-  }
+    const doc = await Service.create({ name, category, price, description, image, providerName, providerEmail });
+    res.status(201).json(doc);
+  } catch (e) { res.status(500).json({ message: e.message }); }
 });
 
 app.get("/services", async (req, res) => {
   try {
     const { search, category, providerEmail, minPrice, maxPrice, sort, page = 1, limit = 12 } = req.query;
-
     const q = {};
     if (providerEmail) q.providerEmail = providerEmail.toLowerCase();
     if (category) q.category = category;
-    if (search) {
-      q.$or = [
-        { name: { $regex: search, $options: "i" } },
-        { category: { $regex: search, $options: "i" } },
-      ];
-    }
+    if (search) q.$or = [
+      { name: { $regex: search, $options: "i" } },
+      { category: { $regex: search, $options: "i" } },
+    ];
     if (minPrice || maxPrice) {
       q.price = {};
       if (minPrice) q.price.$gte = Number(minPrice);
@@ -124,21 +114,18 @@ app.get("/services", async (req, res) => {
     }
 
     const skip = (Number(page) - 1) * Number(limit);
-    let cursor = Service.find(q);
-
-    if (sort === "priceAsc") cursor = cursor.sort({ price: 1 });
-    if (sort === "priceDesc") cursor = cursor.sort({ price: -1 });
-    if (sort === "ratingDesc") cursor = cursor.sort({ ratingAvg: -1 });
+    let cur = Service.find(q);
+    if (sort === "priceAsc") cur = cur.sort({ price: 1 });
+    if (sort === "priceDesc") cur = cur.sort({ price: -1 });
+    if (sort === "ratingDesc") cur = cur.sort({ ratingAvg: -1 });
 
     const [items, total] = await Promise.all([
-      cursor.skip(skip).limit(Number(limit)),
+      cur.skip(skip).limit(Number(limit)),
       Service.countDocuments(q),
     ]);
 
     res.json({ items, total, page: Number(page), pages: Math.ceil(total / Number(limit)) });
-  } catch (err) {
-    res.status(500).json({ message: err.message });
-  }
+  } catch (e) { res.status(500).json({ message: e.message }); }
 });
 
 app.get("/services/:id", async (req, res) => {
@@ -146,9 +133,7 @@ app.get("/services/:id", async (req, res) => {
     const item = await Service.findById(req.params.id);
     if (!item) return res.status(404).json({ message: "Service not found" });
     res.json(item);
-  } catch (err) {
-    res.status(400).json({ message: "Invalid id" });
-  }
+  } catch { res.status(400).json({ message: "Invalid id" }); }
 });
 
 app.patch("/services/:id", async (req, res) => {
@@ -156,24 +141,14 @@ app.patch("/services/:id", async (req, res) => {
     const requester = (req.query.providerEmail || req.body.providerEmail || "").toLowerCase();
     const doc = await Service.findById(req.params.id);
     if (!doc) return res.status(404).json({ message: "Service not found" });
-    if (requester && requester !== doc.providerEmail) {
-      return res.status(403).json({ message: "Forbidden: not owner" });
-    }
+    if (requester && requester !== doc.providerEmail) return res.status(403).json({ message: "Forbidden: not owner" });
 
     const updatable = ["name", "category", "price", "description", "image"];
     const updates = {};
-    updatable.forEach((k) => {
-      if (k in req.body) updates[k] = req.body[k];
-    });
-
-    const updated = await Service.findByIdAndUpdate(req.params.id, updates, {
-      new: true,
-      runValidators: true,
-    });
+    updatable.forEach(k => { if (k in req.body) updates[k] = req.body[k]; });
+    const updated = await Service.findByIdAndUpdate(req.params.id, updates, { new: true, runValidators: true });
     res.json(updated);
-  } catch (err) {
-    res.status(400).json({ message: err.message });
-  }
+  } catch (e) { res.status(400).json({ message: e.message }); }
 });
 
 app.delete("/services/:id", async (req, res) => {
@@ -181,38 +156,32 @@ app.delete("/services/:id", async (req, res) => {
     const requester = (req.query.providerEmail || req.body.providerEmail || "").toLowerCase();
     const doc = await Service.findById(req.params.id);
     if (!doc) return res.status(404).json({ message: "Service not found" });
-    if (requester && requester !== doc.providerEmail) {
-      return res.status(403).json({ message: "Forbidden: not owner" });
-    }
+    if (requester && requester !== doc.providerEmail) return res.status(403).json({ message: "Forbidden: not owner" });
     await Service.findByIdAndDelete(req.params.id);
     res.json({ deleted: true });
-  } catch (err) {
-    res.status(400).json({ message: err.message });
-  }
+  } catch (e) { res.status(400).json({ message: e.message }); }
 });
 
-/* ---------------- Bookings Routes ---------------- */
+/* Bookings */
 app.post("/bookings", async (req, res) => {
   try {
     const { userEmail, serviceId, bookingDate, price } = req.body;
-    if (!userEmail || !serviceId || !bookingDate || price == null) {
+    if (!userEmail || !serviceId || !bookingDate || price == null)
       return res.status(400).json({ message: "Missing required fields" });
-    }
+
     const svc = await Service.findById(serviceId);
     if (!svc) return res.status(404).json({ message: "Service not found" });
-    if (svc.providerEmail.toLowerCase() === userEmail.toLowerCase()) {
+    if (svc.providerEmail.toLowerCase() === userEmail.toLowerCase())
       return res.status(403).json({ message: "You cannot book your own service" });
-    }
-    const booking = await Booking.create({
+
+    const b = await Booking.create({
       userEmail: userEmail.toLowerCase(),
       serviceId,
       bookingDate: new Date(bookingDate),
       price: Number(price),
     });
-    res.status(201).json(booking);
-  } catch (err) {
-    res.status(500).json({ message: err.message });
-  }
+    res.status(201).json(b);
+  } catch (e) { res.status(500).json({ message: e.message }); }
 });
 
 app.get("/bookings", async (req, res) => {
@@ -223,9 +192,7 @@ app.get("/bookings", async (req, res) => {
       .sort({ createdAt: -1 })
       .populate("serviceId", "name image providerName providerEmail price");
     res.json({ items });
-  } catch (err) {
-    res.status(500).json({ message: err.message });
-  }
+  } catch (e) { res.status(500).json({ message: e.message }); }
 });
 
 app.delete("/bookings/:id", async (req, res) => {
@@ -233,14 +200,11 @@ app.delete("/bookings/:id", async (req, res) => {
     const { userEmail } = req.query;
     const b = await Booking.findById(req.params.id);
     if (!b) return res.status(404).json({ message: "Booking not found" });
-    if (userEmail && b.userEmail !== userEmail.toLowerCase()) {
+    if (userEmail && b.userEmail !== userEmail.toLowerCase())
       return res.status(403).json({ message: "Forbidden" });
-    }
     await Booking.findByIdAndDelete(req.params.id);
     res.json({ deleted: true });
-  } catch (err) {
-    res.status(400).json({ message: err.message });
-  }
+  } catch (e) { res.status(400).json({ message: e.message }); }
 });
 
 // Global error handler
